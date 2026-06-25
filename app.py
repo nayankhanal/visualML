@@ -4,12 +4,16 @@ import streamlit.components.v1 as components
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, mean_squared_error, r2_score
+from sklearn.metrics import (
+    accuracy_score, f1_score, confusion_matrix, mean_squared_error, r2_score,
+    silhouette_score,
+)
+from sklearn.decomposition import PCA
 
 from ml_logic import (
-    CLASSIFICATION_MODELS, REGRESSION_MODELS,
+    CLASSIFICATION_MODELS, REGRESSION_MODELS, CLUSTERING_MODELS, DIMRED_MODELS,
     detect_column_types, handle_missing_values, encode_categoricals,
-    scale_features, is_classification_target,
+    scale_features, scale_matrix, is_classification_target,
 )
 
 st.set_page_config(page_title="Visual ML", page_icon="🧠", layout="wide")
@@ -42,6 +46,19 @@ st.caption("Upload data, configure preprocessing, pick an algorithm, tune it —
 
 uploaded = st.sidebar.file_uploader("📂 Upload CSV", type=["csv"])
 st.sidebar.caption("Your data never leaves this session.")
+
+MODES = {
+    "Supervised — predict a column": "supervised",
+    "Clustering — group rows": "clustering",
+    "Dimensionality Reduction": "dimred",
+}
+mode_label = st.sidebar.radio("🧭 What do you want to do?", list(MODES.keys()))
+mode = MODES[mode_label]
+
+# Clear stale results when the user switches mode.
+if st.session_state.get("active_mode") != mode:
+    st.session_state["active_mode"] = mode
+    st.session_state.pop("results", None)
 
 if uploaded is None:
     st.info("👈 Upload a CSV from the sidebar to get started.")
@@ -80,9 +97,14 @@ with tab_prep:
         st.success("No missing values detected.")
 
     st.divider()
-    st.subheader("Target & features")
-    target_col = st.selectbox("🎯 Target column (what to predict)", df.columns)
-    feature_cols = [c for c in df.columns if c != target_col]
+    if mode == "supervised":
+        st.subheader("Target & features")
+        target_col = st.selectbox("🎯 Target column (what to predict)", df.columns)
+        feature_cols = [c for c in df.columns if c != target_col]
+    else:
+        st.subheader("Features")
+        target_col = None
+        feature_cols = list(df.columns)
     selected_features = st.multiselect("✅ Feature columns", feature_cols, default=feature_cols)
 
     cat_features = [c for c in selected_features if col_types[c] == "categorical"]
@@ -101,10 +123,19 @@ with tab_prep:
         scaling_method = st.radio("Method", ["none", "standard", "minmax"], horizontal=True)
 
 with tab_model:
-    task = "classification" if is_classification_target(df[target_col]) else "regression"
-    st.subheader(f"Detected task: {'🔵 Classification' if task == 'classification' else '🟢 Regression'}")
+    if mode == "supervised":
+        task = "classification" if is_classification_target(df[target_col]) else "regression"
+        st.subheader(f"Detected task: {'🔵 Classification' if task == 'classification' else '🟢 Regression'}")
+        model_registry = CLASSIFICATION_MODELS if task == "classification" else REGRESSION_MODELS
+    elif mode == "clustering":
+        task = "clustering"
+        st.subheader("🟣 Clustering")
+        model_registry = CLUSTERING_MODELS
+    else:
+        task = "dimred"
+        st.subheader("🟠 Dimensionality Reduction")
+        model_registry = DIMRED_MODELS
 
-    model_registry = CLASSIFICATION_MODELS if task == "classification" else REGRESSION_MODELS
     model_name = st.selectbox("Algorithm", list(model_registry.keys()))
     _, param_specs = model_registry[model_name]
 
@@ -116,9 +147,11 @@ with tab_model:
             with cols[i % len(cols)]:
                 if spec["type"] == "slider":
                     is_int = isinstance(spec["min"], int)
-                    params[param] = st.slider(
-                        param, spec["min"], spec["max"], spec["default"], spec["step"]
-                    )
+                    max_val = spec["max"]
+                    # PCA can't extract more components than features available.
+                    if model_name == "PCA" and param == "n_components":
+                        max_val = max(2, min(spec["max"], len(selected_features)))
+                    params[param] = st.slider(param, spec["min"], max_val, min(spec["default"], max_val), spec["step"])
                     if is_int:
                         params[param] = int(params[param])
                 elif spec["type"] == "select":
@@ -127,78 +160,138 @@ with tab_model:
         params = {}
         st.caption("This algorithm has no tunable hyperparameters.")
 
-    test_size = st.slider("Test set size (%)", 10, 50, 20) / 100
+    test_size = st.slider("Test set size (%)", 10, 50, 20) / 100 if mode == "supervised" else None
 
-    if st.session_state.get("training"):
-        # Second pass: button is locked while the model trains.
-        st.button("⏳ Training…", type="primary", disabled=True, use_container_width=True)
-        with st.spinner("Training the model…"):
-            work_df = df[selected_features + [target_col]].copy()
-            work_df = encode_categoricals(work_df, cat_features, encoding_method)
-
-            X = work_df.drop(columns=[target_col])
-            y = work_df[target_col]
-
-            if task == "classification" and y.dtype == "object":
-                y = y.astype("category").cat.codes
-
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
-            X_train, X_test = scale_features(X_train, X_test, scaling_method)
-
+    if not selected_features:
+        st.warning("Select at least one feature column in the 🧹 Preprocess tab.")
+    elif st.session_state.get("training"):
+        # Second pass: button is locked while the model runs.
+        verb = "Training" if mode == "supervised" else "Running"
+        st.button(f"⏳ {verb}…", type="primary", disabled=True, use_container_width=True)
+        with st.spinner(f"{verb} the model…"):
             model_cls, _ = model_registry[model_name]
-            model = model_cls(**params)
-            model.fit(X_train, y_train)
-            y_pred = model.predict(X_test)
 
-        st.session_state["results"] = {
-            "task": task, "model_name": model_name,
-            "y_test": y_test, "y_pred": y_pred,
-            "n_train": len(X_train), "n_test": len(X_test),
-        }
+            if mode == "supervised":
+                work_df = encode_categoricals(df[selected_features + [target_col]].copy(), cat_features, encoding_method)
+                X = work_df.drop(columns=[target_col])
+                y = work_df[target_col]
+                # Boosting libs require integer-encoded class labels; encode any
+                # non-numeric target (object/str/category dtypes).
+                if task == "classification" and not pd.api.types.is_numeric_dtype(y):
+                    y = y.astype("category").cat.codes
+
+                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
+                X_train, X_test = scale_features(X_train, X_test, scaling_method)
+                model = model_cls(**params)
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_test)
+                st.session_state["results"] = {
+                    "kind": task, "model_name": model_name,
+                    "y_test": y_test, "y_pred": y_pred,
+                    "n_train": len(X_train), "n_test": len(X_test),
+                }
+            else:
+                work_df = encode_categoricals(df[selected_features].copy(), cat_features, encoding_method)
+                X = scale_matrix(work_df, scaling_method)
+
+                if mode == "clustering":
+                    labels = model_cls(**params).fit_predict(X)
+                    coords = PCA(n_components=2, random_state=42).fit_transform(X) if X.shape[1] > 2 else X[:, :2]
+                    n_clusters = len(set(labels) - {-1})
+                    sil = silhouette_score(X, labels) if 1 < n_clusters < len(X) else None
+                    st.session_state["results"] = {
+                        "kind": "clustering", "model_name": model_name,
+                        "labels": labels, "coords": coords,
+                        "n_clusters": n_clusters, "silhouette": sil,
+                        "n_noise": int((labels == -1).sum()),
+                    }
+                else:  # dimred / PCA
+                    n_comp = min(params.get("n_components", 2), X.shape[1])
+                    pca = PCA(n_components=n_comp, random_state=42)
+                    proj = pca.fit_transform(X)
+                    st.session_state["results"] = {
+                        "kind": "dimred", "model_name": model_name,
+                        "projection": proj,
+                        "explained_variance": pca.explained_variance_ratio_,
+                    }
+
         st.session_state["training"] = False
         st.session_state["just_trained"] = True
         st.rerun()
     else:
         # First pass: lock the button and rerun so the disabled state shows.
-        if st.button("🚀 Train model", type="primary", use_container_width=True):
+        label = "🚀 Train model" if mode == "supervised" else "🚀 Run"
+        if st.button(label, type="primary", use_container_width=True):
             st.session_state["training"] = True
             st.rerun()
 
 with tab_results:
     res = st.session_state.get("results")
     if res is None:
-        st.info("Configure your model in the ⚙️ Model tab and click **Train model**.")
-    else:
+        st.info("Configure your model in the ⚙️ Model tab and run it.")
+    elif res["kind"] == "classification":
         y_test, y_pred = res["y_test"], res["y_pred"]
         st.success(f"Trained **{res['model_name']}** on {res['n_train']:,} rows, tested on {res['n_test']:,} rows.")
+        c1, c2 = st.columns(2)
+        c1.metric("Accuracy", f"{accuracy_score(y_test, y_pred):.3f}")
+        c2.metric("F1 Score", f"{f1_score(y_test, y_pred, average='weighted'):.3f}")
 
-        if res["task"] == "classification":
-            acc = accuracy_score(y_test, y_pred)
-            f1 = f1_score(y_test, y_pred, average="weighted")
-            c1, c2 = st.columns(2)
-            c1.metric("Accuracy", f"{acc:.3f}")
-            c2.metric("F1 Score", f"{f1:.3f}")
+        cm = confusion_matrix(y_test, y_pred)
+        fig = px.imshow(cm, text_auto=True, color_continuous_scale="Reds",
+                        labels=dict(x="Predicted", y="Actual", color="Count"))
+        fig.update_layout(title="Confusion Matrix")
+        st.plotly_chart(fig, use_container_width=True)
 
-            cm = confusion_matrix(y_test, y_pred)
-            fig = px.imshow(
-                cm, text_auto=True, color_continuous_scale="Reds",
-                labels=dict(x="Predicted", y="Actual", color="Count"),
-            )
-            fig.update_layout(title="Confusion Matrix")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            mse = mean_squared_error(y_test, y_pred)
-            r2 = r2_score(y_test, y_pred)
-            c1, c2 = st.columns(2)
-            c1.metric("MSE", f"{mse:.3f}")
-            c2.metric("R² Score", f"{r2:.3f}")
+    elif res["kind"] == "regression":
+        y_test, y_pred = res["y_test"], res["y_pred"]
+        st.success(f"Trained **{res['model_name']}** on {res['n_train']:,} rows, tested on {res['n_test']:,} rows.")
+        c1, c2 = st.columns(2)
+        c1.metric("MSE", f"{mean_squared_error(y_test, y_pred):.3f}")
+        c2.metric("R² Score", f"{r2_score(y_test, y_pred):.3f}")
 
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=y_test, y=y_pred, mode="markers", opacity=0.6, name="Predictions"))
-            lo, hi = min(y_test.min(), y_pred.min()), max(y_test.max(), y_pred.max())
-            fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", line=dict(dash="dash", color="red"), name="Ideal"))
-            fig.update_layout(title="Actual vs Predicted", xaxis_title="Actual", yaxis_title="Predicted")
-            st.plotly_chart(fig, use_container_width=True)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=y_test, y=y_pred, mode="markers", opacity=0.6, name="Predictions"))
+        lo, hi = min(y_test.min(), y_pred.min()), max(y_test.max(), y_pred.max())
+        fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", line=dict(dash="dash", color="red"), name="Ideal"))
+        fig.update_layout(title="Actual vs Predicted", xaxis_title="Actual", yaxis_title="Predicted")
+        st.plotly_chart(fig, use_container_width=True)
+
+    elif res["kind"] == "clustering":
+        st.success(f"Ran **{res['model_name']}** — found **{res['n_clusters']}** cluster(s).")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Clusters", res["n_clusters"])
+        c2.metric("Silhouette", f"{res['silhouette']:.3f}" if res["silhouette"] is not None else "—")
+        c3.metric("Noise points", res["n_noise"])
+
+        coords = res["coords"]
+        fig = px.scatter(
+            x=coords[:, 0], y=coords[:, 1],
+            color=[str(l) for l in res["labels"]],
+            labels={"x": "Component 1", "y": "Component 2", "color": "Cluster"},
+            title="Clusters (projected to 2D)",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        if res["silhouette"] is None:
+            st.caption("Silhouette score needs 2+ clusters (excluding noise) to compute.")
+
+    elif res["kind"] == "dimred":
+        ev = res["explained_variance"]
+        st.success(f"Ran **{res['model_name']}** — {len(ev)} components capture **{ev.sum()*100:.1f}%** of variance.")
+
+        fig_var = px.bar(
+            x=[f"PC{i+1}" for i in range(len(ev))], y=ev * 100,
+            labels={"x": "Component", "y": "Explained variance (%)"},
+            title="Explained Variance by Component",
+        )
+        st.plotly_chart(fig_var, use_container_width=True)
+
+        proj = res["projection"]
+        fig_proj = px.scatter(
+            x=proj[:, 0], y=proj[:, 1],
+            labels={"x": "PC1", "y": "PC2"},
+            title="Data projected onto first 2 components",
+        )
+        st.plotly_chart(fig_proj, use_container_width=True)
 
 # After a successful train, jump the user to the Results tab.
 if st.session_state.pop("just_trained", False):
