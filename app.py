@@ -1,5 +1,6 @@
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.model_selection import train_test_split
@@ -127,13 +128,11 @@ with tab_model:
         st.caption("This algorithm has no tunable hyperparameters.")
 
     test_size = st.slider("Test set size (%)", 10, 50, 20) / 100
-    train_clicked = st.button("🚀 Train model", type="primary", use_container_width=True)
 
-with tab_results:
-    if not train_clicked:
-        st.info("Configure your model in the ⚙️ Model tab and click **Train model**.")
-    else:
-        with st.spinner("Training..."):
+    if st.session_state.get("training"):
+        # Second pass: button is locked while the model trains.
+        st.button("⏳ Training…", type="primary", disabled=True, use_container_width=True)
+        with st.spinner("Training the model…"):
             work_df = df[selected_features + [target_col]].copy()
             work_df = encode_categoricals(work_df, cat_features, encoding_method)
 
@@ -151,9 +150,29 @@ with tab_results:
             model.fit(X_train, y_train)
             y_pred = model.predict(X_test)
 
-        st.success(f"Trained **{model_name}** on {len(X_train):,} rows, tested on {len(X_test):,} rows.")
+        st.session_state["results"] = {
+            "task": task, "model_name": model_name,
+            "y_test": y_test, "y_pred": y_pred,
+            "n_train": len(X_train), "n_test": len(X_test),
+        }
+        st.session_state["training"] = False
+        st.session_state["just_trained"] = True
+        st.rerun()
+    else:
+        # First pass: lock the button and rerun so the disabled state shows.
+        if st.button("🚀 Train model", type="primary", use_container_width=True):
+            st.session_state["training"] = True
+            st.rerun()
 
-        if task == "classification":
+with tab_results:
+    res = st.session_state.get("results")
+    if res is None:
+        st.info("Configure your model in the ⚙️ Model tab and click **Train model**.")
+    else:
+        y_test, y_pred = res["y_test"], res["y_pred"]
+        st.success(f"Trained **{res['model_name']}** on {res['n_train']:,} rows, tested on {res['n_test']:,} rows.")
+
+        if res["task"] == "classification":
             acc = accuracy_score(y_test, y_pred)
             f1 = f1_score(y_test, y_pred, average="weighted")
             c1, c2 = st.columns(2)
@@ -180,3 +199,20 @@ with tab_results:
             fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", line=dict(dash="dash", color="red"), name="Ideal"))
             fig.update_layout(title="Actual vs Predicted", xaxis_title="Actual", yaxis_title="Predicted")
             st.plotly_chart(fig, use_container_width=True)
+
+# After a successful train, jump the user to the Results tab.
+if st.session_state.pop("just_trained", False):
+    components.html(
+        """
+        <script>
+        const switchToResults = () => {
+            const tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
+            for (const t of tabs) {
+                if (t.innerText.includes("Results")) { t.click(); return; }
+            }
+        };
+        setTimeout(switchToResults, 100);
+        </script>
+        """,
+        height=0,
+    )
