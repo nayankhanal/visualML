@@ -6,3 +6,6 @@ streamlit.log
 *.log
 .DS_Store
 .env
+
+# CatBoost writes training logs here at runtime
+catboost_info/
