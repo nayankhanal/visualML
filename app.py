@@ -38,6 +38,31 @@ div[data-testid="stExpander"] {
     border-radius: 12px;
     border: 1px solid rgba(255,255,255,0.1);
 }
+/* Mode selector in the sidebar — spaced-out card-style options */
+section[data-testid="stSidebar"] div[role="radiogroup"] {
+    gap: 10px;
+    margin-top: 6px;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] > label {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 12px;
+    padding: 14px 16px;
+    width: 100%;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] > label:hover {
+    background: rgba(255,75,75,0.08);
+    border-color: rgba(255,75,75,0.45);
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) {
+    background: rgba(255,75,75,0.12);
+    border-color: rgba(255,75,75,0.7);
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] > label p {
+    font-size: 1.02rem;
+    font-weight: 600;
+}
 </style>
 """, unsafe_allow_html=True)
 
