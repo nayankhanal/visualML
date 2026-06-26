@@ -17,7 +17,7 @@ from ml_logic import (
     scale_features, scale_matrix, is_classification_target,
 )
 
-st.set_page_config(page_title="Visual ML", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="Visual ML", page_icon=":material/analytics:", layout="wide")
 
 st.markdown("""
 <style>
@@ -67,10 +67,10 @@ section[data-testid="stSidebar"] div[role="radiogroup"] > label p {
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 Visual ML")
+st.title(":material/analytics: Visual ML")
 st.caption("Upload data, configure preprocessing, pick an algorithm, tune it — no code required.")
 
-uploaded = st.sidebar.file_uploader("📂 Upload CSV", type=["csv"])
+uploaded = st.sidebar.file_uploader(":material/upload_file: Upload CSV", type=["csv"])
 st.sidebar.caption("Your data never leaves this session.")
 
 MODES = {
@@ -78,7 +78,7 @@ MODES = {
     "Clustering — group rows": "clustering",
     "Dimensionality Reduction": "dimred",
 }
-mode_label = st.sidebar.radio("🧭 What do you want to do?", list(MODES.keys()))
+mode_label = st.sidebar.radio(":material/category: What do you want to do?", list(MODES.keys()))
 mode = MODES[mode_label]
 
 # Clear stale results when the user switches mode.
@@ -87,14 +87,15 @@ if st.session_state.get("active_mode") != mode:
     st.session_state.pop("results", None)
 
 if uploaded is None:
-    st.info("👈 Upload a CSV from the sidebar to get started.")
+    st.info("Upload a CSV from the sidebar to get started.", icon=":material/upload:")
     st.stop()
 
 df = pd.read_csv(uploaded)
 col_types = detect_column_types(df)
 
 tab_data, tab_prep, tab_model, tab_results = st.tabs(
-    ["📊 Data", "🧹 Preprocess", "⚙️ Model", "📈 Results"]
+    [":material/table_chart: Data", ":material/cleaning_services: Preprocess",
+     ":material/settings: Model", ":material/monitoring: Results"]
 )
 
 with tab_data:
@@ -125,13 +126,13 @@ with tab_prep:
     st.divider()
     if mode == "supervised":
         st.subheader("Target & features")
-        target_col = st.selectbox("🎯 Target column (what to predict)", df.columns)
+        target_col = st.selectbox(":material/adjust: Target column (what to predict)", df.columns)
         feature_cols = [c for c in df.columns if c != target_col]
     else:
         st.subheader("Features")
         target_col = None
         feature_cols = list(df.columns)
-    selected_features = st.multiselect("✅ Feature columns", feature_cols, default=feature_cols)
+    selected_features = st.multiselect(":material/view_column: Feature columns", feature_cols, default=feature_cols)
 
     cat_features = [c for c in selected_features if col_types[c] == "categorical"]
 
@@ -151,15 +152,16 @@ with tab_prep:
 with tab_model:
     if mode == "supervised":
         task = "classification" if is_classification_target(df[target_col]) else "regression"
-        st.subheader(f"Detected task: {'🔵 Classification' if task == 'classification' else '🟢 Regression'}")
+        task_icon = ":material/category:" if task == "classification" else ":material/trending_up:"
+        st.subheader(f"Detected task: {task_icon} {task.capitalize()}")
         model_registry = CLASSIFICATION_MODELS if task == "classification" else REGRESSION_MODELS
     elif mode == "clustering":
         task = "clustering"
-        st.subheader("🟣 Clustering")
+        st.subheader(":material/scatter_plot: Clustering")
         model_registry = CLUSTERING_MODELS
     else:
         task = "dimred"
-        st.subheader("🟠 Dimensionality Reduction")
+        st.subheader(":material/compress: Dimensionality Reduction")
         model_registry = DIMRED_MODELS
 
     model_name = st.selectbox("Algorithm", list(model_registry.keys()))
@@ -227,11 +229,11 @@ with tab_model:
     test_size = st.slider("Test set size (%)", 10, 50, 20) / 100 if mode == "supervised" else None
 
     if not selected_features:
-        st.warning("Select at least one feature column in the 🧹 Preprocess tab.")
+        st.warning("Select at least one feature column in the Preprocess tab.")
     elif st.session_state.get("training"):
         # Second pass: button is locked while the model runs.
         verb = "Training" if mode == "supervised" else "Running"
-        st.button(f"⏳ {verb}…", type="primary", disabled=True, use_container_width=True)
+        st.button(f":material/hourglass_top: {verb}…", type="primary", disabled=True, use_container_width=True)
         with st.spinner(f"{verb} the model…"):
             model_cls, _ = model_registry[model_name]
 
@@ -309,7 +311,7 @@ with tab_model:
         st.rerun()
     else:
         # First pass: lock the button and rerun so the disabled state shows.
-        label = "🚀 Train model" if mode == "supervised" else "🚀 Run"
+        label = ":material/play_arrow: Train model" if mode == "supervised" else ":material/play_arrow: Run"
         if st.button(label, type="primary", use_container_width=True):
             st.session_state["training"] = True
             st.rerun()
@@ -319,7 +321,7 @@ def render_search_summary(res):
     s = res.get("search")
     if not s:
         return
-    st.markdown(f"🔍 **{s['method']} CV** — best `{s['scoring']}` = **{s['best_score']:.3f}**")
+    st.markdown(f":material/search: **{s['method']} CV** — best `{s['scoring']}` = **{s['best_score']:.3f}**")
     st.write("Best hyperparameters:", s["best_params"])
     with st.expander("Top configurations (CV leaderboard)"):
         st.dataframe(s["leaderboard"], use_container_width=True)
@@ -329,7 +331,7 @@ def render_search_summary(res):
 with tab_results:
     res = st.session_state.get("results")
     if res is None:
-        st.info("Configure your model in the ⚙️ Model tab and run it.")
+        st.info("Configure your model in the Model tab and run it.", icon=":material/tune:")
     elif res["kind"] == "classification":
         y_test, y_pred = res["y_test"], res["y_pred"]
         st.success(f"Trained **{res['model_name']}** on {res['n_train']:,} rows, tested on {res['n_test']:,} rows.")
