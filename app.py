@@ -3,7 +3,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import plotly.express as px
 import plotly.graph_objects as go
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV
 from sklearn.metrics import (
     accuracy_score, f1_score, confusion_matrix, mean_squared_error, r2_score,
     silhouette_score,
@@ -12,6 +12,7 @@ from sklearn.decomposition import PCA
 
 from ml_logic import (
     CLASSIFICATION_MODELS, REGRESSION_MODELS, CLUSTERING_MODELS, DIMRED_MODELS,
+    SEARCH_SPACES, count_grid_combos,
     detect_column_types, handle_missing_values, encode_categoricals,
     scale_features, scale_matrix, is_classification_target,
 )
@@ -164,26 +165,64 @@ with tab_model:
     model_name = st.selectbox("Algorithm", list(model_registry.keys()))
     _, param_specs = model_registry[model_name]
 
-    if param_specs:
-        st.subheader("Hyperparameters")
-        params = {}
-        cols = st.columns(min(3, max(1, len(param_specs))))
-        for i, (param, spec) in enumerate(param_specs.items()):
-            with cols[i % len(cols)]:
-                if spec["type"] == "slider":
-                    is_int = isinstance(spec["min"], int)
-                    max_val = spec["max"]
-                    # PCA can't extract more components than features available.
-                    if model_name == "PCA" and param == "n_components":
-                        max_val = max(2, min(spec["max"], len(selected_features)))
-                    params[param] = st.slider(param, spec["min"], max_val, min(spec["default"], max_val), spec["step"])
-                    if is_int:
-                        params[param] = int(params[param])
-                elif spec["type"] == "select":
-                    params[param] = st.selectbox(param, spec["options"], index=spec["options"].index(spec["default"]))
+    # Hyperparameters: either set manually, or searched automatically via CV.
+    tuning_mode = "manual"
+    cv_folds, n_iter = 3, 10
+    search_grid = SEARCH_SPACES.get(model_name) if mode == "supervised" else None
+
+    if mode == "supervised" and search_grid:
+        st.subheader("Hyperparameter tuning")
+        tuning_label = st.radio(
+            "Tuning mode", ["Manual", "Grid Search CV", "Random Search CV"],
+            horizontal=True,
+            help="Manual: pick values yourself. Grid/Random Search: cross-validate to find the best combination automatically.",
+        )
+        tuning_mode = {"Manual": "manual", "Grid Search CV": "grid", "Random Search CV": "random"}[tuning_label]
+
+    params = {}
+    if tuning_mode == "manual":
+        if param_specs:
+            st.subheader("Hyperparameters")
+            cols = st.columns(min(3, max(1, len(param_specs))))
+            for i, (param, spec) in enumerate(param_specs.items()):
+                with cols[i % len(cols)]:
+                    if spec["type"] == "slider":
+                        is_int = isinstance(spec["min"], int)
+                        max_val = spec["max"]
+                        # PCA can't extract more components than features available.
+                        if model_name == "PCA" and param == "n_components":
+                            max_val = max(2, min(spec["max"], len(selected_features)))
+                        params[param] = st.slider(param, spec["min"], max_val, min(spec["default"], max_val), spec["step"])
+                        if is_int:
+                            params[param] = int(params[param])
+                    elif spec["type"] == "select":
+                        params[param] = st.selectbox(param, spec["options"], index=spec["options"].index(spec["default"]))
+        elif mode == "supervised":
+            st.caption("Auto-tuning isn't available here — this algorithm has no tunable hyperparameters.")
+        else:
+            st.caption("This algorithm has no tunable hyperparameters.")
     else:
-        params = {}
-        st.caption("This algorithm has no tunable hyperparameters.")
+        st.subheader("Search settings")
+        combos = count_grid_combos(search_grid)
+        cfg = st.columns(2)
+        with cfg[0]:
+            cv_folds = st.slider("CV folds", 2, 5, 3)
+        if tuning_mode == "random":
+            n_iter_max = min(30, combos)
+            with cfg[1]:
+                if n_iter_max > 2:
+                    n_iter = st.slider("Search iterations", 2, n_iter_max, min(10, n_iter_max))
+                else:
+                    n_iter = combos
+                    st.caption("Searching all combinations.")
+            fits = n_iter * cv_folds
+        else:
+            fits = combos * cv_folds
+        st.caption(f"Search space: **{combos}** combinations · ≈ **{fits}** model fits ({cv_folds}-fold CV).")
+        if fits > 150:
+            st.warning("That's a lot of fits — may be slow on limited hardware. Try Random Search or fewer folds.")
+        with st.expander("Show search grid"):
+            st.json(search_grid)
 
     test_size = st.slider("Test set size (%)", 10, 50, 20) / 100 if mode == "supervised" else None
 
@@ -207,14 +246,39 @@ with tab_model:
 
                 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
                 X_train, X_test = scale_features(X_train, X_test, scaling_method)
-                model = model_cls(**params)
-                model.fit(X_train, y_train)
-                y_pred = model.predict(X_test)
-                st.session_state["results"] = {
+
+                result = {
                     "kind": task, "model_name": model_name,
-                    "y_test": y_test, "y_pred": y_pred,
                     "n_train": len(X_train), "n_test": len(X_test),
                 }
+                if tuning_mode == "manual":
+                    model = model_cls(**params)
+                    model.fit(X_train, y_train)
+                    y_pred = model.predict(X_test)
+                else:
+                    scoring = "accuracy" if task == "classification" else "r2"
+                    base = model_cls()
+                    if tuning_mode == "grid":
+                        search = GridSearchCV(base, search_grid, cv=cv_folds, scoring=scoring, n_jobs=-1)
+                    else:
+                        search = RandomizedSearchCV(base, search_grid, n_iter=n_iter, cv=cv_folds,
+                                                    scoring=scoring, n_jobs=-1, random_state=42)
+                    search.fit(X_train, y_train)
+                    y_pred = search.best_estimator_.predict(X_test)
+                    lb = pd.DataFrame(search.cv_results_)[["params", "mean_test_score", "rank_test_score"]]
+                    lb = lb.sort_values("rank_test_score").head(5).reset_index(drop=True)
+                    lb["params"] = lb["params"].astype(str)
+                    lb = lb.rename(columns={"mean_test_score": f"mean_cv_{scoring}", "rank_test_score": "rank"})
+                    result["search"] = {
+                        "method": "Grid Search" if tuning_mode == "grid" else "Random Search",
+                        "best_params": search.best_params_,
+                        "best_score": search.best_score_,
+                        "scoring": scoring,
+                        "leaderboard": lb,
+                    }
+                result["y_test"] = y_test
+                result["y_pred"] = y_pred
+                st.session_state["results"] = result
             else:
                 work_df = encode_categoricals(df[selected_features].copy(), cat_features, encoding_method)
                 X = scale_matrix(work_df, scaling_method)
@@ -250,6 +314,18 @@ with tab_model:
             st.session_state["training"] = True
             st.rerun()
 
+def render_search_summary(res):
+    """Show CV search results (best params + leaderboard) when present."""
+    s = res.get("search")
+    if not s:
+        return
+    st.markdown(f"🔍 **{s['method']} CV** — best `{s['scoring']}` = **{s['best_score']:.3f}**")
+    st.write("Best hyperparameters:", s["best_params"])
+    with st.expander("Top configurations (CV leaderboard)"):
+        st.dataframe(s["leaderboard"], use_container_width=True)
+    st.divider()
+
+
 with tab_results:
     res = st.session_state.get("results")
     if res is None:
@@ -257,6 +333,7 @@ with tab_results:
     elif res["kind"] == "classification":
         y_test, y_pred = res["y_test"], res["y_pred"]
         st.success(f"Trained **{res['model_name']}** on {res['n_train']:,} rows, tested on {res['n_test']:,} rows.")
+        render_search_summary(res)
         c1, c2 = st.columns(2)
         c1.metric("Accuracy", f"{accuracy_score(y_test, y_pred):.3f}")
         c2.metric("F1 Score", f"{f1_score(y_test, y_pred, average='weighted'):.3f}")
@@ -270,6 +347,7 @@ with tab_results:
     elif res["kind"] == "regression":
         y_test, y_pred = res["y_test"], res["y_pred"]
         st.success(f"Trained **{res['model_name']}** on {res['n_train']:,} rows, tested on {res['n_test']:,} rows.")
+        render_search_summary(res)
         c1, c2 = st.columns(2)
         c1.metric("MSE", f"{mean_squared_error(y_test, y_pred):.3f}")
         c2.metric("R² Score", f"{r2_score(y_test, y_pred):.3f}")

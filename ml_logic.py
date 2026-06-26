@@ -149,6 +149,30 @@ CATEGORIES = {
     "Dimensionality Reduction": DIMRED_MODELS,
 }
 
+# Candidate values per hyperparameter for automated GridSearch / RandomizedSearch.
+# Keyed by algorithm display name (param names are shared across the
+# classification/regression variants, so one grid serves both). Algorithms with
+# no meaningful hyperparameters (Linear Regression, Naive Bayes) are absent and
+# fall back to a plain fit.
+SEARCH_SPACES = {
+    "Logistic Regression": {"C": [0.01, 0.1, 1.0, 10.0]},
+    "Decision Tree": {"max_depth": [3, 5, 10, None], "min_samples_split": [2, 5, 10]},
+    "Random Forest": {"n_estimators": [100, 200], "max_depth": [5, 10, None]},
+    "SVM": {"C": [0.1, 1.0, 10.0], "kernel": ["linear", "rbf"]},
+    "KNN": {"n_neighbors": [3, 5, 7, 11]},
+    "Gradient Boosting": {"n_estimators": [100, 200], "learning_rate": [0.05, 0.1], "max_depth": [3, 5]},
+    "XGBoost": {"n_estimators": [100, 200], "learning_rate": [0.05, 0.1], "max_depth": [3, 6]},
+    "LightGBM": {"n_estimators": [100, 200], "learning_rate": [0.05, 0.1], "max_depth": [-1, 5]},
+    "CatBoost": {"iterations": [100, 200], "learning_rate": [0.05, 0.1], "depth": [4, 6]},
+}
+
+
+def count_grid_combos(grid: dict) -> int:
+    total = 1
+    for values in grid.values():
+        total *= len(values)
+    return total
+
 
 def detect_column_types(df: pd.DataFrame) -> dict:
     return {
